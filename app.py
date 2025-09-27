@@ -270,7 +270,7 @@ SCALER_FEATURES = ['Age', 'Sex', 'RestingBP', 'Cholesterol', 'FastingBS', 'MaxHR
 def load_model():
     """Loads the model and scaler components from the pickled file."""
     try:
-        with open('model/heart_model_pipeline_v2.pkl', 'rb') as file:
+        with open('heart_model_pipeline_v2.pkl', 'rb') as file:
             pipeline_components = pickle.load(file)
         return pipeline_components['model'], pipeline_components['scaler']
     except FileNotFoundError:
