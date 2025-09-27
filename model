@@ -1,0 +1,5 @@
+git lfs track "*.pkl"
+git add .gitattributes
+git add model/heart_model_pipeline_v2.pkl
+git commit -m "Add trained model"
+git push
