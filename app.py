@@ -421,7 +421,7 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
 # --- Main App Logic ---
-st.markdown('<h1 class="main-header"><span class="heart">🫀</span> Heart Disease Prediction App</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-header"><span class="heart">🫀</span> Heart Disease Prediction System</h1>', unsafe_allow_html=True)
 st.markdown('<div class="info-box">🔬 Advanced AI-powered cardiovascular risk assessment and analysis system for healthcare professionals</div>', unsafe_allow_html=True)
 
 # Tabs are now implemented using st.selectbox for stable navigation
