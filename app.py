@@ -11,7 +11,7 @@ warnings.filterwarnings('ignore')
 
 # --- Page Config and CSS ---
 st.set_page_config(
-    page_title="Heart Disease Prediction App",
+    page_title="Heart Disease Prediction System",
     page_icon="🫀",
     layout="wide",
     initial_sidebar_state="expanded"
