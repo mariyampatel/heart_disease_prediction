@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import warnings
 import random
+import io
 
 warnings.filterwarnings('ignore')
 
@@ -20,7 +21,7 @@ st.set_page_config(
 st.markdown("""
 <style>
     /* Import Google Fonts */
-    @import url('https://fonts.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
     
     /* Main app container */
     .stApp {
@@ -177,7 +178,7 @@ st.markdown("""
         background: #2980b9;
     }
     
-    /* Tab styling */
+    /* Tab styling (used for st.selectbox as a navigation bar) */
     .stTabs [data-baseweb="tab-list"] {
         gap: 8px;
         background: rgba(255, 255, 255, 0.1);
@@ -270,12 +271,35 @@ SCALER_FEATURES = ['Age', 'Sex', 'RestingBP', 'Cholesterol', 'FastingBS', 'MaxHR
 def load_model():
     """Loads the model and scaler components from the pickled file."""
     try:
+        # NOTE: This file must exist in the same directory for the code to run locally.
         with open('heart_model_pipeline_v2.pkl', 'rb') as file:
             pipeline_components = pickle.load(file)
         return pipeline_components['model'], pipeline_components['scaler']
     except FileNotFoundError:
-        st.error("❌ Model file not found. Please ensure 'heart_model_pipeline_v2.pkl' is in the 'model' directory.")
-        st.stop()
+        # Placeholder/Mock data for execution environment where the file doesn't exist
+        st.warning("❌ Model file 'heart_model_pipeline_v2.pkl' not found. Using mock model/scaler for demonstration.")
+        
+        # Mock Scaler for demonstration (only transforms data structure, not actual scaling)
+        class MockScaler:
+            def transform(self, data):
+                return data.values[:, :len(SCALER_FEATURES)] 
+
+        # Mock Model for demonstration
+        class MockModel:
+            def predict(self, features):
+                # Simple mock prediction: result is 1 if Age * Cholesterol is high (first and fourth features of SCALER_FEATURES)
+                try:
+                    # Simple heuristic: high age (feature 0) and high cholesterol (feature 3) is high risk (1)
+                    return np.array([1 if f[0] > 50 and f[3] > 200 else 0 for f in features])
+                except IndexError:
+                    return np.array([0] * features.shape[0])
+
+            def predict_proba(self, features):
+                predictions = self.predict(features)
+                probs = np.array([[0.2, 0.8] if p == 1 else [0.8, 0.2] for p in predictions])
+                return probs
+            
+        return MockModel(), MockScaler()
     except Exception as e:
         st.error(f"❌ Model loading error: {e}")
         st.stop()
@@ -302,16 +326,25 @@ def prepare_features_for_scaler(df):
         df_copy['ExerciseAngina'] = df_copy['ExerciseAngina'].astype(str).str.upper().map({'Y': 1, 'N': 0}).fillna(df_copy['ExerciseAngina'])
         df_copy['ExerciseAngina'] = pd.to_numeric(df_copy['ExerciseAngina'], errors='coerce').fillna(0).astype(int)
 
+    # Ensure all scaler features exist, filling missing numerical ones with 0 before selection
+    for feature in SCALER_FEATURES:
+        if feature not in df_copy.columns:
+            df_copy[feature] = 0
+        elif df_copy[feature].dtype == object: # Handle cases where numeric features are read as object/string
+            df_copy[feature] = pd.to_numeric(df_copy[feature], errors='coerce').fillna(df_copy[feature].median() if len(df_copy) > 1 and df_copy[feature].notnull().any() else 0)
+
     return df_copy[SCALER_FEATURES]
 
 def prepare_features_for_model(df):
-    """Prepare all 18 features that model expects"""
+    """Prepare all 18 features that model expects (encoded + numerical)"""
     df_copy = normalize_column_names(df)
     
+    # 1. Sex encoding
     if 'Sex' in df_copy.columns:
         df_copy['Sex'] = df_copy['Sex'].astype(str).str.upper().map({'M': 1, 'F': 0}).fillna(df_copy['Sex'])
         df_copy['Sex'] = pd.to_numeric(df_copy['Sex'], errors='coerce').fillna(0).astype(int)
     
+    # 2. ChestPain encoding
     if 'ChestPain' in df_copy.columns:
         chest_pain_dummies = pd.get_dummies(df_copy['ChestPain'], prefix='ChestPain')
         df_copy = pd.concat([df_copy, chest_pain_dummies], axis=1)
@@ -321,6 +354,7 @@ def prepare_features_for_model(df):
         if cp_type not in df_copy.columns:
             df_copy[cp_type] = 0
     
+    # 3. RestingECG encoding
     if 'RestingECG' in df_copy.columns:
         resting_ecg_dummies = pd.get_dummies(df_copy['RestingECG'], prefix='RestingECG')
         df_copy = pd.concat([df_copy, resting_ecg_dummies], axis=1)
@@ -330,10 +364,12 @@ def prepare_features_for_model(df):
         if ecg_type not in df_copy.columns:
             df_copy[ecg_type] = 0
     
+    # 4. ExerciseAngina encoding
     if 'ExerciseAngina' in df_copy.columns:
         df_copy['ExerciseAngina'] = df_copy['ExerciseAngina'].astype(str).str.upper().map({'Y': 1, 'N': 0}).fillna(df_copy['ExerciseAngina'])
         df_copy['ExerciseAngina'] = pd.to_numeric(df_copy['ExerciseAngina'], errors='coerce').fillna(0).astype(int)
     
+    # 5. ST_Slope encoding
     if 'ST_Slope' in df_copy.columns:
         st_slope_dummies = pd.get_dummies(df_copy['ST_Slope'], prefix='ST_Slope')
         df_copy = pd.concat([df_copy, st_slope_dummies], axis=1)
@@ -344,27 +380,37 @@ def prepare_features_for_model(df):
             df_copy[slope_type] = 0
     
     model_features = [
-        'Age', 'Sex', 'RestingBP', 'Cholesterol', 'FastingBS', 'MaxHR', 'Oldpeak',
+        'Age', 'Sex', 'RestingBP', 'Cholesterol', 'FastingBS', 'MaxHR', 'Oldpeak', 'ExerciseAngina',
         'ChestPain_ATA', 'ChestPain_ASY', 'ChestPain_NAP', 'ChestPain_TA',
         'RestingECG_LVH', 'RestingECG_Normal', 'RestingECG_ST',
-        'ExerciseAngina', 'ST_Slope_Down', 'ST_Slope_Flat', 'ST_Slope_Up'
+        'ST_Slope_Down', 'ST_Slope_Flat', 'ST_Slope_Up'
     ]
     
     for col in model_features:
         if col not in df_copy.columns:
             df_copy[col] = 0
-    
+        elif col in SCALER_FEATURES and df_copy[col].dtype == object:
+             df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce').fillna(df_copy[col].median() if len(df_copy) > 1 and df_copy[col].notnull().any() else 0)
+
     return df_copy[model_features]
 
 def make_prediction(input_df):
     """Make predictions with correct feature handling"""
     try:
+        # Prepare and scale the numerical features
         scaler_data = prepare_features_for_scaler(input_df)
         scaled_data = scaler.transform(scaler_data)
         
-        model_data = prepare_features_for_model(input_df)
-        final_features = model_data.values.copy()
-        final_features[:, :8] = scaled_data
+        # Prepare the full feature set (unscaled numerical + encoded categorical)
+        model_data_df = prepare_features_for_model(input_df)
+        
+        # Replace the unscaled numerical columns with the scaled versions
+        for i, feature in enumerate(SCALER_FEATURES):
+            if feature in model_data_df.columns:
+                # Use the scaled data derived from the input's SCALER_FEATURES (order is maintained by prepare_features_for_scaler)
+                model_data_df[feature] = scaled_data[:, i]
+        
+        final_features = model_data_df.values
         
         predictions = model.predict(final_features)
         probabilities = model.predict_proba(final_features)
@@ -425,24 +471,26 @@ st.markdown('<h1 class="main-header"><span class="heart">🫀</span> Heart Disea
 st.markdown('<div class="info-box">🔬 Advanced AI-powered cardiovascular risk assessment and analysis system for healthcare professionals</div>', unsafe_allow_html=True)
 
 # Tabs are now implemented using st.selectbox for stable navigation
-# This line has been updated to fix the warning
+if 'selected_tab' not in st.session_state:
+    st.session_state.selected_tab = "🏠 Home"
+
 st.session_state.selected_tab = st.selectbox(
     "Navigation", 
     ["🏠 Home", "🩺 Manual Assessment", "📊 Bulk Analysis", "📈 Visualization"],
+    index=["🏠 Home", "🩺 Manual Assessment", "📊 Bulk Analysis", "📈 Visualization"].index(st.session_state.selected_tab),
     label_visibility="collapsed"
 )
 
 # Content based on selected tab
 if st.session_state.selected_tab == "🏠 Home":
-    st.markdown('<h2 class="sub-header">🏥 Welcome to Heart Disease Prediction App</h2>', unsafe_allow_html=True)
+    st.markdown('<h2 class="sub-header">🏥 Welcome to Heart Disease Prediction System</h2>', unsafe_allow_html=True)
     
     col1, col2 = st.columns([2, 1])
     
     with col1:
         st.markdown("""
         <div class="info-box">
-            <h3>🔬 Advanced Cardiovascular Risk Assessment
-</h3>
+            <h3>🔬 Advanced Cardiovascular Risk Assessment</h3>
             <p>CardioPredict is a state-of-the-art AI system designed to assist healthcare professionals 
             in rapid cardiovascular risk evaluation. Our machine learning model analyzes 18 key health 
             parameters to provide accurate risk predictions.</p>
@@ -493,27 +541,27 @@ elif st.session_state.selected_tab == "🩺 Manual Assessment":
         
         with col1:
             st.markdown("👤 Demographics**")
-            age = st.number_input("🎂 Age (years)", min_value=1, max_value=120, value=50, help="Patient's age in years")
-            sex = st.selectbox("⚥ Gender", options=['M', 'F'], 
-                              format_func=lambda x: "👨 Male" if x == 'M' else "👩 Female")
+            age = st.number_input("🎂 Age (years)", min_value=1, max_value=120, value=None, placeholder="Enter age", help="Patient's age in years")
+            sex = st.selectbox("⚥ Gender", options=['M', 'F'], index=None, 
+                              format_func=lambda x: "Select Gender" if x is None else "👨 Male" if x == 'M' else "👩 Female")
             
             st.markdown("💓 Cardiovascular**")
-            resting_bp = st.number_input("🩸 Resting BP (mmHg)", min_value=80, max_value=200, value=120,
+            resting_bp = st.number_input("🩸 Resting BP (mmHg)", min_value=80, max_value=200, value=None, placeholder="Enter BP",
                                         help="Resting blood pressure in mmHg")
-            cholesterol = st.number_input("🧪 Cholesterol (mg/dl)", min_value=0, max_value=600, value=200,
+            cholesterol = st.number_input("🧪 Cholesterol (mg/dl)", min_value=0, max_value=600, value=None, placeholder="Enter cholesterol",
                                          help="Serum cholesterol level")
         
         with col2:
             st.markdown("🔬 Clinical Tests**")
-            fasting_bs = st.selectbox("🍽 Fasting Blood Sugar > 120 mg/dl", options=[0, 1], 
-                                     format_func=lambda x: "✅ Yes" if x == 1 else "❌ No")
-            max_hr = st.number_input("❤ Max Heart Rate (bpm)", min_value=60, max_value=220, value=150,
+            fasting_bs = st.selectbox("🍽 Fasting Blood Sugar > 120 mg/dl", options=[0, 1], index=None,
+                                     format_func=lambda x: "Select Option" if x is None else "✅ Yes" if x == 1 else "❌ No")
+            max_hr = st.number_input("❤ Max Heart Rate (bpm)", min_value=60, max_value=220, value=None, placeholder="Enter max HR",
                                     help="Maximum heart rate achieved during exercise")
             
             st.markdown("🏃 Exercise Response**")
-            exercise_angina = st.selectbox("💔 Exercise Induced Angina", options=['Y', 'N'], 
-                                          format_func=lambda x: "✅ Yes" if x == 'Y' else "❌ No")
-            oldpeak = st.number_input("📉 ST Depression (Oldpeak)", min_value=0.0, max_value=10.0, value=1.0, step=0.1,
+            exercise_angina = st.selectbox("💔 Exercise Induced Angina", options=['Y', 'N'], index=None,
+                                          format_func=lambda x: "Select Option" if x is None else "✅ Yes" if x == 'Y' else "❌ No")
+            oldpeak = st.number_input("📉 ST Depression (Oldpeak)", min_value=0.0, max_value=10.0, value=None, placeholder="Enter ST depression", step=0.1,
                                      help="ST depression induced by exercise")
         
         with col3:
@@ -525,8 +573,8 @@ elif st.session_state.selected_tab == "🩺 Manual Assessment":
                 'TA': '💔 Typical Angina'
             }
             chest_pain = st.selectbox("💔 Chest Pain Type", 
-                                     options=list(chest_pain_options.keys()),
-                                     format_func=lambda x: chest_pain_options[x])
+                                     options=list(chest_pain_options.keys()), index=None,
+                                     format_func=lambda x: "Select Type" if x is None else chest_pain_options[x])
             
             ecg_options = {
                 'Normal': '✅ Normal',
@@ -534,8 +582,8 @@ elif st.session_state.selected_tab == "🩺 Manual Assessment":
                 'LVH': '🫀 Left Ventricular Hypertrophy'
             }
             resting_ecg = st.selectbox("📊 Resting ECG", 
-                                      options=list(ecg_options.keys()),
-                                      format_func=lambda x: ecg_options[x])
+                                      options=list(ecg_options.keys()), index=None,
+                                      format_func=lambda x: "Select Type" if x is None else ecg_options[x])
             
             slope_options = {
                 'Up': '📈 Upsloping',
@@ -543,8 +591,8 @@ elif st.session_state.selected_tab == "🩺 Manual Assessment":
                 'Down': '📉 Downsloping'
             }
             st_slope = st.selectbox("📈 ST Slope", 
-                                   options=list(slope_options.keys()),
-                                   format_func=lambda x: slope_options[x])
+                                   options=list(slope_options.keys()), index=None,
+                                   format_func=lambda x: "Select Type" if x is None else slope_options[x])
     
         st.markdown("---")
         col1, col2, col3 = st.columns([1, 2, 1])
@@ -552,75 +600,84 @@ elif st.session_state.selected_tab == "🩺 Manual Assessment":
             submitted = st.form_submit_button("🔍 Analyze Risk Profile", use_container_width=True, type="primary")
 
     if submitted:
-        input_data = pd.DataFrame({
-            'Age': [age], 'Sex': [sex], 'ChestPain': [chest_pain], 'RestingBP': [resting_bp],
-            'Cholesterol': [cholesterol], 'FastingBS': [fasting_bs], 'RestingECG': [resting_ecg],
-            'MaxHR': [max_hr], 'ExerciseAngina': [exercise_angina], 'Oldpeak': [oldpeak], 'ST_Slope': [st_slope]
-        })
-        
-        prediction, prediction_proba = make_prediction(input_data)
-        
-        if prediction is not None:
-            result = {
-                'prediction': prediction[0],
-                'prob_disease': prediction_proba[0][1],
-                'prob_healthy': prediction_proba[0][0],
-                'risk_percentage': prediction_proba[0][1] * 100
-            }
+        # Validation - check if all fields are filled (None values)
+        if any(v is None for v in [age, sex, fasting_bs, exercise_angina, oldpeak, resting_bp, cholesterol, max_hr, chest_pain, resting_ecg, st_slope]):
+            st.error("⚠ Please fill all fields before submitting.")
+        else:
+            input_data = pd.DataFrame({
+                'Age': [age], 'Sex': [sex], 'ChestPain': [chest_pain], 'RestingBP': [resting_bp],
+                'Cholesterol': [cholesterol], 'FastingBS': [fasting_bs], 'RestingECG': [resting_ecg],
+                'MaxHR': [max_hr], 'ExerciseAngina': [exercise_angina], 'Oldpeak': [oldpeak], 'ST_Slope': [st_slope]
+            })
             
-            st.markdown('<div class="result-container">', unsafe_allow_html=True)
+            prediction, prediction_proba = make_prediction(input_data)
             
-            risk_level, recommendation = get_risk_interpretation(result['prob_disease'])
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                risk_color = "background-color: #e74c3c;" if result['prediction'] == 1 else "background-color: #27ae60;"
-                st.markdown(f"""
-                <div class="metric-card" style="{risk_color}">
-                    <h3>{risk_level.split()[1]} {risk_level.split()[2]}</h3>
-                    <p>Risk Assessment</p>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            with col2:
-                st.markdown(f"""
-                <div class="metric-card" style="background-color: #e67e22;">
-                    <h3>{result['risk_percentage']:.1f}%</h3>
-                    <p>Disease Probability</p>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            with col3:
-                st.markdown(f"""
-                <div class="metric-card" style="background-color: #3498db;">
-                    <h3>{(1-result['prob_disease'])*100:.1f}%</h3>
-                    <p>Healthy Probability</p>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            st.markdown("### 📋 Clinical Interpretation")
-            
-            if result['prob_disease'] >= 0.6:
-                st.markdown(f"""
-                <div class="warning-box">
-                    <h4>{risk_level}</h4>
-                    <p><strong>Recommendation:</strong> {recommendation}</p>
-                    <p><strong>Next Steps:</strong> Comprehensive cardiovascular evaluation recommended. 
-                    Consider additional diagnostic tests such as stress testing, echocardiogram, or coronary angiography.</p>
-                </div>
-                """, unsafe_allow_html=True)
-            else:
-                st.markdown(f"""
-                <div class="success-box">
-                    <h4>{risk_level}</h4>
-                    <p><strong>Recommendation:</strong> {recommendation}</p>
-                    <p><strong>Next Steps:</strong> Continue regular health maintenance. 
-                    Monitor cardiovascular risk factors and maintain healthy lifestyle practices.</p>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            st.markdown('</div>', unsafe_allow_html=True)
+            if prediction is not None:
+                result = {
+                    'prediction': prediction[0],
+                    'prob_disease': prediction_proba[0][1],
+                    'prob_healthy': prediction_proba[0][0],
+                    'risk_percentage': prediction_proba[0][1] * 100
+                }
+                
+                st.markdown('<div class="result-container">', unsafe_allow_html=True)
+                
+                risk_level, recommendation = get_risk_interpretation(result['prob_disease'])
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    risk_color = "background-color: #e74c3c;" if result['prediction'] == 1 else "background-color: #27ae60;"
+                    risk_text_parts = risk_level.split()
+                    # Only show the risk level, not the icon
+                    risk_text = " ".join(risk_text_parts[1:]) 
+                    st.markdown(f"""
+                    <div class="metric-card" style="{risk_color}">
+                        <h3>{risk_text}</h3>
+                        <p>Risk Assessment</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col2:
+                    disease_pct = f"{result['risk_percentage']:.1f}"
+                    st.markdown(f"""
+                    <div class="metric-card" style="background-color: #e67e22;">
+                        <h3>{disease_pct}&#37;</h3>
+                        <p>Disease Probability</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col3:
+                    healthy_pct = f"{(1-result['prob_disease'])*100:.1f}"
+                    st.markdown(f"""
+                    <div class="metric-card" style="background-color: #3498db;">
+                        <h3>{healthy_pct}&#37;</h3>
+                        <p>Healthy Probability</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                st.markdown("### 📋 Clinical Interpretation")
+                
+                if result['prob_disease'] >= 0.6:
+                    st.markdown(f"""
+                    <div class="warning-box">
+                        <h4>{risk_level}</h4>
+                        <p><strong>Recommendation:</strong> {recommendation}</p>
+                        <p><strong>Next Steps:</strong> Comprehensive cardiovascular evaluation recommended. 
+                        Consider additional diagnostic tests such as stress testing, echocardiogram, or coronary angiography.</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+                    <div class="success-box">
+                        <h4>{risk_level}</h4>
+                        <p><strong>Recommendation:</strong> {recommendation}</p>
+                        <p><strong>Next Steps:</strong> Continue regular health maintenance. 
+                        Monitor cardiovascular risk factors and maintain healthy lifestyle practices.</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                st.markdown('</div>', unsafe_allow_html=True)
 
 elif st.session_state.selected_tab == "📊 Bulk Analysis":
     st.markdown('<h2 class="sub-header">📊 Bulk Patient Analysis</h2>', unsafe_allow_html=True)
@@ -645,7 +702,7 @@ elif st.session_state.selected_tab == "📊 Bulk Analysis":
                 total_patients = len(df_uploaded)
                 total_features = len(df_uploaded.columns)
                 missing_data = df_uploaded.isnull().sum().sum()
-                data_quality = (1 - missing_data/(total_patients * total_features)) * 100
+                data_quality = (1 - missing_data/(total_patients * total_features)) * 100 if total_patients * total_features > 0 else 100
                 
                 st.markdown(f"""
                 <div class="metric-card">
@@ -654,17 +711,11 @@ elif st.session_state.selected_tab == "📊 Bulk Analysis":
                 </div>
                 """, unsafe_allow_html=True)
                 
-                st.markdown(f"""
-                <div class="metric-card">
-                    <h3>{total_features}</h3>
-                    <p>Features</p>
-                </div>
-                """, unsafe_allow_html=True)
-                
                 quality_class = "high-quality" if data_quality > 95 else "medium-quality" if data_quality > 85 else "low-quality"
+                quality_text = f"{data_quality:.1f}&#37;"
                 st.markdown(f"""
                 <div class="metric-card">
-                    <h3><span class="quality-indicator {quality_class}">{data_quality:.1f}%</span></h3>
+                    <h3><span class="quality-indicator {quality_class}">{quality_text}</span></h3>
                     <p>Data Quality</p>
                 </div>
                 """, unsafe_allow_html=True)
@@ -684,56 +735,66 @@ elif st.session_state.selected_tab == "📊 Bulk Analysis":
                             lambda x: 'High Risk' if x == 1 else 'Low Risk'
                         )
                         
-                        st.session_state['df_results'] = df_uploaded
+                        st.session_state['df_results'] = df_uploaded.copy()
                         
                         st.markdown('<div class="section-header">📊 Analysis Summary</div>', unsafe_allow_html=True)
                         
                         col1, col2, col3, col4 = st.columns(4)
                         
+                        high_risk = sum(df_uploaded['Prediction'] == 1)
+                        high_risk_pct = f"{(high_risk/len(df_uploaded))*100:.1f}"
+                        
+                        low_risk = sum(df_uploaded['Prediction'] == 0)
+                        low_risk_pct = f"{(low_risk/len(df_uploaded))*100:.1f}"
+                        
                         with col1:
-                            high_risk = sum(df_uploaded['Prediction'] == 1)
-                            high_risk_pct = (high_risk/len(df_uploaded))*100
                             st.markdown(f"""
                             <div class="metric-card" style="background-color: #e74c3c">
                                 <h3>{high_risk}</h3>
-                                <p>High Risk ({high_risk_pct:.1f}%)</p>
+                                <p>High Risk ({high_risk_pct}&#37;)</p>
                             </div>
                             """, unsafe_allow_html=True)
                         
                         with col2:
-                            low_risk = sum(df_uploaded['Prediction'] == 0)
-                            low_risk_pct = (low_risk/len(df_uploaded))*100
                             st.markdown(f"""
                             <div class="metric-card" style="background-color: #27ae60">
                                 <h3>{low_risk}</h3>
-                                <p>Low Risk ({low_risk_pct:.1f}%)</p>
+                                <p>Low Risk ({low_risk_pct}&#37;)</p>
                             </div>
                             """, unsafe_allow_html=True)
                         
                         with col3:
-                            avg_risk = df_uploaded['Risk_Probability'].mean()
+                            avg_risk = f"{df_uploaded['Risk_Probability'].mean()*100:.1f}"
                             st.markdown(f"""
                             <div class="metric-card" style="background-color: #e67e22">
-                                <h3>{avg_risk*100:.1f}%</h3>
+                                <h3>{avg_risk}&#37;</h3>
                                 <p>Average Risk</p>
                             </div>
                             """, unsafe_allow_html=True)
                         
                         with col4:
-                            max_risk = df_uploaded['Risk_Probability'].max()
+                            max_risk = f"{df_uploaded['Risk_Probability'].max()*100:.1f}"
                             st.markdown(f"""
                             <div class="metric-card" style="background-color: #9b59b6">
-                                <h3>{max_risk*100:.1f}%</h3>
+                                <h3>{max_risk}&#37;</h3>
                                 <p>Highest Risk</p>
                             </div>
                             """, unsafe_allow_html=True)
                         
                         fig, ax = plt.subplots(figsize=(10, 6))
                         risk_counts = df_uploaded['Risk_Category'].value_counts()
+                        # Use all defined colors
                         colors = ['#2ecc71', '#f39c12', '#e67e22', '#e74c3c', '#8e44ad']
                         
+                        # Use all defined categories for consistent order/color mapping
+                        category_order = ['Very Low', 'Low', 'Moderate', 'High', 'Very High']
+                        risk_counts = risk_counts.reindex(category_order).fillna(0)
+                        risk_counts = risk_counts[risk_counts > 0] # Filter out zero counts
+                        
                         wedges, texts, autotexts = ax.pie(risk_counts.values, labels=risk_counts.index, 
-                                                         autopct='%1.1f%%', colors=colors, startangle=90,
+                                                         autopct='%1.1f%%', 
+                                                         colors=colors[:len(risk_counts)], 
+                                                         startangle=90,
                                                          explode=[0.05]*len(risk_counts), shadow=True)
                         ax.set_title('Risk Category Distribution', fontsize=16, fontweight='bold', pad=20)
                         
@@ -746,12 +807,19 @@ elif st.session_state.selected_tab == "📊 Bulk Analysis":
                         plt.close()
                         
                         st.markdown('<div class="section-header">📋 Detailed Results</div>', unsafe_allow_html=True)
+                        # Display all columns for detailed results
                         st.dataframe(df_uploaded, use_container_width=True)
                         
-                        csv_data = df_uploaded.to_csv(index=False).encode('utf-8')
+                        # Download Button
+                        @st.cache_data
+                        def convert_df(df):
+                            return df.to_csv(index=False).encode('utf-8')
+                        
+                        csv = convert_df(df_uploaded)
+
                         st.download_button(
                             label="💾 Download Complete Analysis",
-                            data=csv_data,
+                            data=csv,
                             file_name=f'cardiopredict_analysis_{pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")}.csv',
                             mime='text/csv',
                             use_container_width=True
@@ -771,7 +839,8 @@ elif st.session_state.selected_tab == "📈 Visualization":
         df_viz['Prediction_Label'] = df_viz['Prediction'].apply(lambda x: 'Heart Disease' if x == 1 else 'Healthy')
         
         if 'Sex' in df_viz.columns:
-            df_viz['Gender'] = df_viz['Sex'].map({1: 'Male', 0: 'Female', 'M': 'Male', 'F': 'Female'})
+            # Handle both string ('M'/'F') and numeric (1/0) based on how the file was read
+            df_viz['Gender'] = df_viz['Sex'].map({1: 'Male', 0: 'Female', 'M': 'Male', 'F': 'Female'}).fillna('Unknown')
         
         st.markdown('<div class="section-header">📊 Choose Analysis Type</div>', unsafe_allow_html=True)
         
@@ -802,26 +871,26 @@ elif st.session_state.selected_tab == "📈 Visualization":
                 """, unsafe_allow_html=True)
             with col2:
                 high_risk_count = sum(df_viz['Prediction'] == 1)
-                high_risk_pct = (high_risk_count/total_patients)*100
+                high_risk_pct = f"{(high_risk_count/total_patients)*100:.1f}"
                 st.markdown(f"""
                 <div class="metric-card" style="background-color: #e74c3c;">
-                    <h3>🔴 {high_risk_pct:.1f}%</h3>
+                    <h3>🔴 {high_risk_pct}&#37;</h3>
                     <p>High Risk Rate</p>
                 </div>
                 """, unsafe_allow_html=True)
             with col3:
-                avg_age = df_viz['Age'].mean()
+                avg_age = f"{df_viz['Age'].mean():.1f}"
                 st.markdown(f"""
                 <div class="metric-card" style="background-color: #e67e22;">
-                    <h3>📊 {avg_age:.1f}</h3>
+                    <h3>📊 {avg_age}</h3>
                     <p>Average Age</p>
                 </div>
                 """, unsafe_allow_html=True)
             with col4:
-                avg_risk = df_viz['Risk_Probability'].mean()
+                avg_risk = f"{df_viz['Risk_Probability'].mean()*100:.1f}"
                 st.markdown(f"""
                 <div class="metric-card" style="background-color: #9b59b6;">
-                    <h3>⚠ {avg_risk*100:.1f}%</h3>
+                    <h3>⚠ {avg_risk}&#37;</h3>
                     <p>Average Risk</p>
                 </div>
                 """, unsafe_allow_html=True)
@@ -883,7 +952,7 @@ elif st.session_state.selected_tab == "📈 Visualization":
                 st.pyplot(fig2)
                 plt.close()
             
-            if 'Gender' in df_viz.columns:
+            if 'Gender' in df_viz.columns and len(df_viz['Gender'].unique()) > 1:
                 col1, col2 = st.columns(2)
                 with col1:
                     fig3, ax3 = plt.subplots(figsize=(12, 8))
@@ -917,22 +986,22 @@ elif st.session_state.selected_tab == "📈 Visualization":
             fig.suptitle('Clinical Metrics Comprehensive Analysis', fontsize=24, fontweight='bold', y=0.98)
             sns.violinplot(data=df_viz, x='Prediction_Label', y='RestingBP', ax=axes[0,0], palette=['#3498db', '#e74c3c'], inner='box')
             axes[0,0].set_title('Resting Blood Pressure Distribution', fontweight='bold', fontsize=16, pad=15)
-            axes[0,0].set_xlabel('')
+            axes[0,0].set_xlabel('Diagnosis', fontsize=14, fontweight='bold')
             axes[0,0].set_ylabel('Resting BP (mmHg)', fontsize=14, fontweight='bold')
             axes[0,0].grid(True, alpha=0.3)
             sns.violinplot(data=df_viz, x='Prediction_Label', y='Cholesterol', ax=axes[0,1], palette=['#27ae60', '#e67e22'], inner='box')
             axes[0,1].set_title('Cholesterol Level Distribution', fontweight='bold', fontsize=16, pad=15)
-            axes[0,1].set_xlabel('')
+            axes[0,1].set_xlabel('Diagnosis', fontsize=14, fontweight='bold')
             axes[0,1].set_ylabel('Cholesterol (mg/dl)', fontsize=14, fontweight='bold')
             axes[0,1].grid(True, alpha=0.3)
             sns.violinplot(data=df_viz, x='Prediction_Label', y='MaxHR', ax=axes[1,0], palette=['#9b59b6', '#f39c12'], inner='box')
             axes[1,0].set_title('Maximum Heart Rate Distribution', fontweight='bold', fontsize=16, pad=15)
-            axes[1,0].set_xlabel('')
+            axes[1,0].set_xlabel('Diagnosis', fontsize=14, fontweight='bold')
             axes[1,0].set_ylabel('Max Heart Rate (bpm)', fontsize=14, fontweight='bold')
             axes[1,0].grid(True, alpha=0.3)
             sns.violinplot(data=df_viz, x='Prediction_Label', y='Oldpeak', ax=axes[1,1], palette=['#1abc9c', '#e74c3c'], inner='box')
             axes[1,1].set_title('ST Depression (Oldpeak) Distribution', fontweight='bold', fontsize=16, pad=15)
-            axes[1,1].set_xlabel('')
+            axes[1,1].set_xlabel('Diagnosis', fontsize=14, fontweight='bold')
             axes[1,1].set_ylabel('ST Depression', fontsize=14, fontweight='bold')
             axes[1,1].grid(True, alpha=0.3)
             plt.tight_layout()
@@ -952,6 +1021,7 @@ elif st.session_state.selected_tab == "📈 Visualization":
                 fig1, ax1 = plt.subplots(figsize=(12, 8))
                 n, bins, patches = ax1.hist(df_viz['Risk_Probability'], bins=30, alpha=0.8, edgecolor='black', linewidth=1.2)
                 for i, p in enumerate(patches):
+                    # Color coding for risk bins
                     if bins[i] < 0.2: p.set_facecolor('#27ae60')
                     elif bins[i] < 0.4: p.set_facecolor('#f39c12')
                     elif bins[i] < 0.6: p.set_facecolor('#e67e22')
@@ -973,6 +1043,10 @@ elif st.session_state.selected_tab == "📈 Visualization":
                 fig2, ax2 = plt.subplots(figsize=(12, 8))
                 risk_counts = df_viz['Risk_Category'].value_counts()
                 colors = ['#27ae60', '#f39c12', '#e67e22', '#e74c3c', '#8e44ad']
+                category_order = ['Very Low', 'Low', 'Moderate', 'High', 'Very High']
+                risk_counts = risk_counts.reindex(category_order).fillna(0)
+                risk_counts = risk_counts[risk_counts > 0]
+                
                 wedges, texts, autotexts = ax2.pie(risk_counts.values, labels=risk_counts.index, 
                                                   autopct='%1.1f%%', colors=colors[:len(risk_counts)], 
                                                   startangle=90, explode=[0.05]*len(risk_counts), shadow=True,
@@ -985,6 +1059,7 @@ elif st.session_state.selected_tab == "📈 Visualization":
                 plt.tight_layout()
                 st.pyplot(fig2)
                 plt.close()
+            
             fig3, ax3 = plt.subplots(figsize=(15, 8))
             scatter = ax3.scatter(df_viz['Age'], df_viz['Risk_Probability'], 
                                  c=df_viz['Risk_Probability'], cmap='RdYlBu_r', s=100, alpha=0.7, edgecolors='black', linewidth=0.5)
@@ -1002,7 +1077,7 @@ elif st.session_state.selected_tab == "📈 Visualization":
             st.markdown("### 🔥 Feature Correlation Analysis")
             numeric_cols = ['Age', 'RestingBP', 'Cholesterol', 'FastingBS', 'MaxHR', 'Oldpeak', 'Risk_Probability']
             available_cols = [col for col in numeric_cols if col in df_viz.columns]
-            if len(available_cols) > 2:
+            if len(available_cols) >= 2:
                 corr_matrix = df_viz[available_cols].corr()
                 fig, ax = plt.subplots(figsize=(14, 12))
                 mask = np.triu(np.ones_like(corr_matrix, dtype=bool))
@@ -1030,21 +1105,26 @@ elif st.session_state.selected_tab == "📈 Visualization":
                     plt.tight_layout()
                     st.pyplot(fig4)
                     plt.close()
+            else:
+                st.warning("⚠ Cannot generate correlation matrix: need at least two numeric columns (Age, RestingBP, Cholesterol, MaxHR, Oldpeak, Risk_Probability).")
+
         
         elif selected_viz == "Predictive Insights":
             st.markdown("### 🔬 Predictive Insights & Model Confidence")
-            st.markdown("#### Feature Importance Analysis")
-            feature_names = ['Age', 'MaxHR', 'Oldpeak', 'Cholesterol', 'RestingBP', 'Sex', 'FastingBS', 
-                             'ChestPain_ATA', 'ChestPain_ASY', 'ChestPain_NAP', 'ChestPain_TA',
-                             'RestingECG_LVH', 'RestingECG_Normal', 'RestingECG_ST',
-                             'ExerciseAngina', 'ST_Slope_Down', 'ST_Slope_Flat', 'ST_Slope_Up']
-            importance_scores = [0.15, 0.12, 0.11, 0.10, 0.08, 0.07, 0.06, 0.05, 0.05, 0.04, 0.03,
-                                 0.03, 0.02, 0.02, 0.01, 0.01, 0.01, 0.01]
+            
+            # Since the actual feature importances are not stored in the session state, we use mock/placeholder values
+            st.markdown("#### Feature Importance Analysis (Placeholder)")
+            feature_names = ['Oldpeak', 'MaxHR', 'Age', 'Cholesterol', 'RestingBP', 'Sex', 'FastingBS', 
+                             'ChestPain_ASY', 'ChestPain_NAP', 'ST_Slope_Flat', 'ExerciseAngina']
+            # Mock importances reflecting expected pattern
+            importance_scores = [0.15, 0.12, 0.11, 0.10, 0.08, 0.07, 0.06, 0.05, 0.04, 0.03, 0.02] 
+            
             importance_df = pd.DataFrame({'Feature': feature_names, 'Importance': importance_scores})
             importance_df = importance_df.sort_values(by='Importance', ascending=False)
+            
             fig1, ax1 = plt.subplots(figsize=(12, 8))
             bars = ax1.barh(importance_df['Feature'], importance_df['Importance'], color='steelblue', alpha=0.8)
-            ax1.set_title('Feature Importance', fontsize=16, fontweight='bold')
+            ax1.set_title('Feature Importance (Simulated)', fontsize=16, fontweight='bold')
             ax1.set_xlabel('Importance Score', fontsize=12)
             ax1.set_ylabel('Feature', fontsize=12)
             for bar, score in zip(bars, importance_df['Importance']):
@@ -1053,6 +1133,7 @@ elif st.session_state.selected_tab == "📈 Visualization":
             plt.tight_layout()
             st.pyplot(fig1)
             plt.close()
+            
             st.markdown("#### Prediction Confidence Distribution")
             fig2, ax2 = plt.subplots(figsize=(10, 6))
             sns.histplot(df_viz['Risk_Probability'], bins=20, kde=True, ax=ax2, color='#667eea', alpha=0.8)
@@ -1066,7 +1147,7 @@ elif st.session_state.selected_tab == "📈 Visualization":
             st.pyplot(fig2)
             plt.close()
     else:
-        st.info("📤 Please upload and process data in the 'Bulk Analysis' tab to see analytics Home.")
+        st.info("📤 Please upload and process data in the 'Bulk Analysis' tab to see analytics here.")
 
 # Footer
 st.markdown("---")
